@@ -1,5 +1,5 @@
 
-bleak==0.20.2 # see Dockerfile
+bleak==0.22.3 # see Dockerfile
 #bleak-retry-connector
 
 paho-mqtt==2.1.0

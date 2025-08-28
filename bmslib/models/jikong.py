@@ -49,6 +49,67 @@ MAX_RESPONSE_SIZE = 320
 
 
 class JKBt(BtBms):
+    async def _resolve_writable_characteristic(self, client):
+      """
+      Resolve and return a writable characteristic object/uuid/handle for this device.
+      Preference order:
+        1) already-known self.char_handle_write
+        2) a characteristic that has both 'write' (or 'write-without-response') and 'notify'
+        3) any characteristic with 'write' or 'write-without-response'
+        4) known JK UUIDs fallback (ffe1/ffe2/ffe3)
+      On success stores the result in self.char_handle_write and returns it.
+      """
+      if getattr(self, "char_handle_write", None):
+          return self.char_handle_write
+
+      services = getattr(client, "services", None)
+      try:
+          if services is None:
+              await client.get_services()
+              services = getattr(client, "services", None)
+      except Exception:
+          services = getattr(client, "services", None)
+
+      read_ch = getattr(self, "char_handle_read", None)
+      if read_ch is not None:
+          props = getattr(read_ch, "properties", []) or []
+          if "write" in props or "write-without-response" in props:
+              self.char_handle_write = read_ch
+              return read_ch
+
+      writable_notify = None
+      writable_any = None
+      if services:
+          for svc in services:
+              for ch in svc.characteristics:
+                  props = getattr(ch, "properties", []) or []
+                  has_write = ("write" in props) or ("write-without-response" in props)
+                  has_notify = ("notify" in props) or ("indicate" in props)
+                  if has_write and has_notify and writable_notify is None:
+                      writable_notify = ch
+                  if has_write and writable_any is None:
+                      writable_any = ch
+          if writable_notify:
+              self.char_handle_write = writable_notify
+              return writable_notify
+          if writable_any:
+              self.char_handle_write = writable_any
+              return writable_any
+
+      known_write_uuids = {
+          "0000ffe1-0000-1000-8000-00805f9b34fb",
+          "0000ffe2-0000-1000-8000-00805f9b34fb",
+          "0000ffe3-0000-1000-8000-00805f9b34fb",
+      }
+      if services:
+          for svc in services:
+              for ch in svc.characteristics:
+                  if getattr(ch, "uuid", "").lower() in known_write_uuids:
+                      self.char_handle_write = ch
+                      return ch
+
+      return None
+
     SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
     CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
 
@@ -167,7 +228,31 @@ class JKBt(BtBms):
         with await self._fetch_futures.acquire_timeout(resp, timeout=self.TIMEOUT / 2):
             frame = _jk_command(cmd, [])
             self.logger.debug("write %s", frame)
-            await self.client.write_gatt_char(self.char_handle_write, data=frame)
+
+            ch = getattr(self, "char_handle_write", None)
+            if ch is None:
+                try:
+                    ch = await self._resolve_writable_characteristic(self.client)
+                except Exception as e:
+                    try:
+                        _LOGGER.debug("characteristic resolution error for %s: %s", getattr(self, "address", "unknown"), e)
+                    except Exception:
+                        pass
+                    ch = None
+
+            if ch is None:
+                raise RuntimeError(f"No writable characteristic found for device {getattr(self, 'address', 'unknown')}")
+            try:
+                ch_info = f"uuid={getattr(ch,'uuid',None)} handle={getattr(ch,'handle',None)}"
+            except Exception:
+                ch_info = str(ch)
+            try:
+                _LOGGER.debug("writing to characteristic %s for device %s", ch_info, getattr(self, "address", "unknown"))
+            except Exception:
+                pass
+
+            await self.client.write_gatt_char(ch, data=frame)
+
             return await self._fetch_futures.wait_for(resp, self.TIMEOUT)
 
     async def _write(self, address, value):
